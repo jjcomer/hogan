@@ -6,10 +6,11 @@ extern crate log;
 extern crate serde_derive;
 
 pub mod config;
+pub mod datadogstatsd;
+pub mod db;
 pub mod git;
 pub mod template;
 pub mod transform;
-pub mod datadogstatsd;
 
 use regex::Regex;
 use std::path::{Path, PathBuf};
