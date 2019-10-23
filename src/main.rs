@@ -304,7 +304,7 @@ fn main() -> Result<(), Error> {
             common,
             port,
             address,
-            cache_size,
+            cache_size: _,
             lambda,
             environments_regex,
             datadog,
@@ -398,8 +398,9 @@ fn transform_env(
         &sha,
         &env,
         &state.config_dir,
-        None,
         &state.environments_regex,
+        &uri,
+        state.dd_metrics.as_ref(),
     ) {
         Some(env) => {
             let handlebars = hogan::transform::handlebars(state.strict);
@@ -418,7 +419,11 @@ fn transform_env(
 
 #[get("/envs/<sha>")]
 fn get_envs(sha: String, state: State<ServerState>) -> Result<JsonValue, Status> {
-    let r: Vec<_> = state.db.scan_keys(&sha).collect();
+    let r: Vec<_> = state
+        .db
+        .scan(&sha)
+        .map(|(k, _)| String::from_utf8(k.to_vec()).unwrap())
+        .collect();
 
     if !r.is_empty() {
         let env_list = format_keys(&r);
@@ -444,13 +449,15 @@ fn get_config_by_env(
     state: State<ServerState>,
 ) -> Result<JsonValue, Status> {
     let sha = format_sha(&sha);
+    let uri = format!("/envs/{}", &sha);
     match get_env(
         &state.db,
         &sha,
         &env,
         &state.config_dir,
-        None,
         &state.environments_regex,
+        &uri,
+        state.dd_metrics.as_ref(),
     ) {
         Some(environment) => Ok(json!(environment)),
         None => Err(Status::NotFound),
@@ -516,19 +523,21 @@ fn add_env_to_db(
     envs: &[hogan::config::Environment],
     key_base: &str,
 ) -> Result<(), Error> {
-    for env in envs {
+    let total = envs.len();
+    for (pos, env) in envs.iter().enumerate() {
         let key = build_key(key_base, &env.environment, &env.environment_type);
         db.save(&key, &env.config_data)?;
-        debug!("Added {} to db", key);
+        debug!("Added {} to db {}/{}", key, pos + 1, total);
     }
     Ok(())
 }
 
 fn wrap_config_struct(
     env: Option<&str>,
-    i: (String, serde_json::Value),
+    i: (Box<[u8]>, Box<[u8]>),
 ) -> Option<hogan::config::Environment> {
     let (key, config_data) = i;
+    let key = String::from_utf8(key.to_vec()).unwrap();
     let parsed_key = key.split(':').collect::<Vec<&str>>();
 
     if let Some(env) = env {
@@ -537,6 +546,14 @@ fn wrap_config_struct(
             return None;
         }
     }
+
+    let config_data = match serde_json::from_slice(&config_data) {
+        Ok(json) => json,
+        Err(e) => {
+            warn!("Unable to decode config data {} {}", key, e);
+            return None;
+        }
+    };
 
     if parsed_key.len() == 3 {
         Some(hogan::config::Environment {
@@ -581,22 +598,43 @@ fn update_db(
     }
 }
 
+enum CacheAction {
+    Hit,
+    Miss,
+}
+
+fn cache_metric_inc(request_url: &str, action: CacheAction, dd_metrics: Option<&DdMetrics>) {
+    if let Some(dd_metrics) = dd_metrics {
+        dd_metrics.incr(
+            match action {
+                CacheAction::Hit => CustomMetrics::CacheHit.metrics_name(),
+                CacheAction::Miss => CustomMetrics::CacheMiss.metrics_name(),
+            },
+            request_url,
+        );
+    }
+}
+
 fn get_env(
     db: &db::ConfigDB,
     sha: &str,
     env: &str,
     repo: &Mutex<hogan::config::ConfigDir>,
-    remote: Option<&str>,
     environments_regex: &Regex,
+    request_url: &str,
+    dd_metrics: Option<&DdMetrics>,
 ) -> Option<hogan::config::Environment> {
     let key = build_key(sha, env, &None);
     info!("Looking up key: {}", key);
     let mut r = db
         .scan(&key)
         .filter_map(|v| wrap_config_struct(Some(env), v));
-    if let Some(env) = r.next() {
-        Some(env)
-    } else if let Some(envs) = update_db(db, sha, repo, remote, environments_regex) {
+    if let Some(found_env) = r.next() {
+        debug!("Cache hit: {} {}", sha, env);
+        cache_metric_inc(request_url, CacheAction::Hit, dd_metrics);
+        Some(found_env)
+    } else if let Some(envs) = update_db(db, sha, repo, None, environments_regex) {
+        cache_metric_inc(request_url, CacheAction::Miss, dd_metrics);
         envs.iter()
             .find(|e| e.environment == env)
             .map(|e| e.to_owned())

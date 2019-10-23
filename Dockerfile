@@ -4,8 +4,9 @@ FROM clux/muslrust:nightly as build
 
 # Install cmake as it is not included in muslrust, but is needed by libssh2-sys
 RUN apt-get update && apt-get install -y \
-  cmake \
+  cmake clang llvm build-essential curl llvm-dev libclang-dev linux-headers-generic libsnappy-dev liblz4-dev libzstd-dev libgflags-dev zlib1g-dev libbz2-dev\
   --no-install-recommends && \
+  ln -s /usr/bin/g++ /usr/bin/musl-g++ &&\
   rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

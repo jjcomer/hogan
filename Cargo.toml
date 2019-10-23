@@ -1,6 +1,6 @@
 [package]
 name = "hogan"
-version = "0.5.0"
+version = "0.6.0"
 authors = ["Jonathan Morley <jmorley@cvent.com>"]
 edition = "2018"
 
@@ -31,7 +31,7 @@ rocket = { version = "0.4", default-features = false }
 rocket_contrib = "0.4"
 rocket_lamb = "0.6"
 dogstatsd = "0.6"
-sled = "0.29"
+rocksdb = { git = "https://github.com/rust-rocksdb/rust-rocksdb.git", rev = "master"}
 
 [dev-dependencies]
 assert_cmd = "0.11"
