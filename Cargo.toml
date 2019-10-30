@@ -27,11 +27,9 @@ tempfile = "3"
 url = "2"
 walkdir = "2"
 zip = "0.5"
-rocket = { version = "0.4", default-features = false }
-rocket_contrib = "0.4"
-rocket_lamb = "0.6"
+actix-web = "1.0"
 dogstatsd = "0.6"
-rocksdb = { git = "https://github.com/rust-rocksdb/rust-rocksdb.git", rev = "master"}
+rocksdb = "0.12"
 
 [dev-dependencies]
 assert_cmd = "0.11"

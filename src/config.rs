@@ -106,7 +106,6 @@ impl ConfigDir {
                 internal_path,
             } => {
                 let temp_dir = tempfile::tempdir()?;
-
                 let git_repo = git::clone(
                     &url,
                     branch.as_ref().map(|x| &**x),
@@ -114,12 +113,26 @@ impl ConfigDir {
                     Some(&ssh_key_path),
                 )?;
 
+                match std::process::Command::new("ls")
+                    .arg("-al")
+                    .arg("/hogan-test/hogan-repo/")
+                    .output()
+                {
+                    Ok(r) => info!("Command Result: {}", String::from_utf8(r.stdout)?),
+                    Err(e) => warn!("Unable to run command {:?}", e),
+                };
+
                 let head_sha = git::get_head_sha(&git_repo)?;
+
+                info!("Initial head sha: {}", head_sha);
 
                 let directory = match git_repo.workdir() {
                     Some(workdir) => workdir.join(internal_path),
                     None => bail!("No working directory found for git repository"),
                 };
+
+                info!("Repo directory: {:?}", directory);
+
                 let ssh_key_path = ssh_key_path.to_owned();
 
                 Ok(ConfigDir::Git {
@@ -134,8 +147,16 @@ impl ConfigDir {
         };
 
         if let Ok(ref config_dir) = config_dir {
+            match config_dir.directory().metadata() {
+                Ok(m) => info!("Repo metadata {:?}", m),
+                Err(e) => warn!(
+                    "Unable to fetch metadata for {:?} {:?}",
+                    config_dir.directory(),
+                    e
+                ),
+            };
             if !config_dir.directory().is_dir() {
-                bail!(
+                warn!(
                     "{:?} either does not exist or is not a directory. It needs to be both",
                     config_dir.directory()
                 )
@@ -219,7 +240,7 @@ impl ConfigDir {
             ConfigDir::find_environment_types(self).collect::<Vec<EnvironmentType>>();
         let global = find_env_type_data(&environment_types, "global");
 
-        ConfigDir::find_environments(self, filter)
+        let envs = ConfigDir::find_environments(self, filter)
             .map(|mut environment| {
                 let parent = if let Some(ref env_type_name) = environment.environment_type {
                     find_env_type_data(&environment_types, env_type_name)
@@ -234,7 +255,9 @@ impl ConfigDir {
                 environment.config_data = config_data;
                 environment
             })
-            .collect()
+            .collect::<Vec<Environment>>();
+        info!("Found {} environments", envs.len());
+        envs
     }
 
     fn find_environments(&self, filter: Regex) -> Box<dyn Iterator<Item = Environment>> {
