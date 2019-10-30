@@ -1,120 +1,101 @@
-#![feature(proc_macro_hygiene, decl_macro)]
-
 #[macro_use]
 extern crate failure;
 #[macro_use]
 extern crate log;
-#[macro_use]
-extern crate rocket;
-#[macro_use]
-extern crate rocket_contrib;
 
+use actix_web::{web, HttpResponse, HttpServer};
 use failure::Error;
 use hogan;
 use hogan::config::ConfigDir;
 use hogan::config::ConfigUrl;
 use hogan::datadogstatsd::{CustomMetrics, DdMetrics};
-use hogan::template::{Template, TemplateDir};
+use hogan::template::TemplateDir;
 use lru_time_cache::LruCache;
 use regex::{Regex, RegexBuilder};
-use rocket::config::Config;
-use rocket::fairing::{Fairing, Info, Kind};
-use rocket::http::Status;
-use rocket::request::{self, FromRequest};
-use rocket::Outcome;
-use rocket::{Data, State};
-use rocket::{Request, Response};
-use rocket_contrib::json::{Json, JsonValue};
-use rocket_lamb::RocketExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use shellexpand;
 use std::collections::HashMap;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::ErrorKind::AlreadyExists;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::SystemTime;
 use stderrlog;
 use structopt;
+use structopt::clap::AppSettings;
 use structopt::StructOpt;
 
-// static CustomMetrics: DdMetrics = DdMetrics::new();
+// // static CustomMetrics: DdMetrics = DdMetrics::new();
 
-/// Fairing for timing requests.
-pub struct RequestTimer;
+// /// Fairing for timing requests.
+// pub struct RequestTimer;
 
-/// Value stored in request-local state.
-#[derive(Copy, Clone)]
-struct TimerStart(Option<SystemTime>);
+// /// Value stored in request-local state.
+// #[derive(Copy, Clone)]
+// struct TimerStart(Option<SystemTime>);
 
-impl Fairing for RequestTimer {
-    fn info(&self) -> Info {
-        Info {
-            name: "Request Timer",
-            kind: Kind::Request | Kind::Response,
-        }
-    }
+// impl Fairing for RequestTimer {
+//     fn info(&self) -> Info {
+//         Info {
+//             name: "Request Timer",
+//             kind: Kind::Request | Kind::Response,
+//         }
+//     }
 
-    /// Stores the start time of the request in request-local state.
-    fn on_request(&self, request: &mut Request, _: &Data) {
-        // Store a `TimerStart` instead of directly storing a `SystemTime`
-        // to ensure that this usage doesn't conflict with anything else
-        // that might store a `SystemTime` in request-local cache.
-        if request.uri().path() != "/ok" {
-            request.local_cache(|| TimerStart(Some(SystemTime::now())));
-        }
-    }
+//     /// Stores the start time of the request in request-local state.
+//     fn on_request(&self, request: &mut Request, _: &Data) {
+//         // Store a `TimerStart` instead of directly storing a `SystemTime`
+//         // to ensure that this usage doesn't conflict with anything else
+//         // that might store a `SystemTime` in request-local cache.
+//         if request.uri().path() != "/ok" {
+//             request.local_cache(|| TimerStart(Some(SystemTime::now())));
+//         }
+//     }
 
-    /// Adds a header to the response indicating how long the server took to
-    /// process the request.
-    fn on_response(&self, request: &Request, response: &mut Response) {
-        info!("request uri: {}", request.uri().path());
-        if request.uri().path() != "/ok" {
-            let start_time = request.local_cache(|| TimerStart(None));
-            if let Some(Ok(duration)) = start_time.0.map(|st| st.elapsed()) {
-                let ms = duration.as_secs() * 1000 + duration.subsec_millis() as u64;
-                info!("Request duration: {} ms", ms);
-                let metrics = DdMetrics::new();
-                metrics.gauge(
-                    CustomMetrics::RequestTime.metrics_name(),
-                    request.uri().path(),
-                    &ms.to_string(),
-                );
-                response.set_raw_header("X-Response-Time", format!("{} ms", ms));
-            }
-        }
-    }
-}
+//     /// Adds a header to the response indicating how long the server took to
+//     /// process the request.
+//     fn on_response(&self, request: &Request, response: &mut Response) {
+//         info!("request uri: {}", request.uri().path());
+//         if request.uri().path() != "/ok" {
+//             let start_time = request.local_cache(|| TimerStart(None));
+//             if let Some(Ok(duration)) = start_time.0.map(|st| st.elapsed()) {
+//                 let ms = duration.as_secs() * 1000 + duration.subsec_millis() as u64;
+//                 info!("Request duration: {} ms", ms);
+//                 let metrics = DdMetrics::new();
+//                 metrics.gauge(
+//                     CustomMetrics::RequestTime.metrics_name(),
+//                     request.uri().path(),
+//                     &ms.to_string(),
+//                 );
+//                 response.set_raw_header("X-Response-Time", format!("{} ms", ms));
+//             }
+//         }
+//     }
+// }
 
-/// Request guard used to retrieve the start time of a request.
-#[derive(Copy, Clone)]
-pub struct StartTime(pub SystemTime);
+// /// Request guard used to retrieve the start time of a request.
+// #[derive(Copy, Clone)]
+// pub struct StartTime(pub SystemTime);
 
-// Allows a route to access the time a request was initiated.
-impl<'a, 'r> FromRequest<'a, 'r> for StartTime {
-    type Error = ();
+// // Allows a route to access the time a request was initiated.
+// impl<'a, 'r> FromRequest<'a, 'r> for StartTime {
+//     type Error = ();
 
-    fn from_request(request: &'a Request<'r>) -> request::Outcome<StartTime, ()> {
-        match *request.local_cache(|| TimerStart(None)) {
-            TimerStart(Some(time)) => Outcome::Success(StartTime(time)),
-            TimerStart(None) => Outcome::Failure((Status::InternalServerError, ())),
-        }
-    }
-}
+//     fn from_request(request: &'a Request<'r>) -> request::Outcome<StartTime, ()> {
+//         match *request.local_cache(|| TimerStart(None)) {
+//             TimerStart(Some(time)) => Outcome::Success(StartTime(time)),
+//             TimerStart(None) => Outcome::Failure((Status::InternalServerError, ())),
+//         }
+//     }
+// }
 
 /// Transform templates with handlebars
 #[derive(StructOpt, Debug)]
-#[structopt(raw(setting = "structopt::clap::AppSettings::InferSubcommands"))]
+#[structopt(setting = AppSettings::InferSubcommands)]
 struct App {
     /// Sets the level of verbosity
-    #[structopt(
-        short = "v",
-        long = "verbose",
-        parse(from_occurrences),
-        raw(global = "true")
-    )]
+    #[structopt(short = "v", long = "verbose", parse(from_occurrences), global = true)]
     verbosity: usize,
 
     #[structopt(subcommand)]
@@ -133,7 +114,7 @@ enum AppCommand {
         #[structopt(
             short = "e",
             long = "environments-filter",
-            parse(try_from_str = "App::parse_regex"),
+            parse(try_from_str = App::parse_regex),
             default_value = ".+",
             value_name = "REGEX"
         )]
@@ -153,7 +134,7 @@ enum AppCommand {
         #[structopt(
             short = "f",
             long = "templates-filter",
-            parse(try_from_str = "App::parse_regex"),
+            parse(try_from_str = App::parse_regex),
             default_value = "^[^.]*(\\w+\\.)*template([-.].+)?\\.(config|ya?ml|properties)",
             value_name = "REGEX"
         )]
@@ -195,7 +176,7 @@ enum AppCommand {
         #[structopt(
             short = "e",
             long = "environments-filter",
-            parse(try_from_str = "App::parse_regex"),
+            parse(try_from_str = App::parse_regex),
             default_value = ".+",
             value_name = "REGEX"
         )]
@@ -218,7 +199,7 @@ struct AppCommon {
     #[structopt(
         short = "k",
         long = "ssh-key",
-        parse(from_str = "App::parse_path_buf"),
+        parse(from_str = App::parse_path_buf),
         default_value = "~/.ssh/id_rsa",
         value_name = "FILE"
     )]
@@ -358,47 +339,40 @@ fn start_server(
     state: ServerState,
     dd_enabled: bool,
 ) -> Result<(), Error> {
-    let mut config = Config::development();
-    config.set_port(port);
-    config.set_address(address)?;
-    let routes = routes![
-        health_check,
-        get_envs,
-        get_config_by_env,
-        transform_env,
-        transform_all_envs,
-        get_branch_sha,
-    ];
-    let server = if dd_enabled {
-        rocket::custom(config)
-            .mount("/", routes)
-            .attach(RequestTimer)
-    } else {
-        rocket::custom(config).mount("/", routes)
-    }
-    .manage(state);
-    if lambda {
-        server.lambda().launch();
-    } else {
-        server.launch();
-    }
-    Ok(())
+    let server_state = web::Data::new(state);
+
+    HttpServer::new(move || {
+        actix_web::App::new()
+            .register_data(server_state.clone())
+            .route("/ok", web::get().to(|| HttpResponse::Ok()))
+            .route("/transform/{sha}/{env}", web::post().to(transform_env))
+            .route("/config/{sha}/{env}", web::get().to(get_config_by_env))
+            .route("/heads/{branch_name}", web::get().to(get_branch_sha))
+            .route("/envs/{sha}", web::get().to(get_envs))
+    })
+    .bind(format!("{}:{}", address, port))?
+    .run()
+    .map_err(|e| e.into())
 }
 
-#[get("/ok")]
-fn health_check() -> Status {
-    Status::Ok
-}
-
-#[post("/transform/<sha>/<env>", data = "<body>")]
-fn transform_env(
-    body: Data,
+#[derive(Deserialize)]
+struct ShaEnvParams {
     sha: String,
     env: String,
-    state: State<ServerState>,
-) -> Result<String, Status> {
-    let sha = format_sha(&sha);
-    let uri = format!("/transform/{}/{}", &sha, &env);
+}
+
+#[derive(Deserialize)]
+struct ShaParams {
+    sha: String,
+}
+
+fn transform_env(
+    params: web::Path<ShaEnvParams>,
+    state: web::Data<ServerState>,
+    data: String,
+) -> HttpResponse {
+    let sha = format_sha(&params.sha);
+    let uri = format!("/transform/{}/{}", &sha, &params.env);
     match get_env(
         &state.environments,
         &state.config_dir,
@@ -408,79 +382,74 @@ fn transform_env(
         &uri,
         state.dd_metrics.as_ref(),
     ) {
-        Some(environments) => match environments.iter().find(|e| e.environment == env) {
+        Some(environments) => match environments.iter().find(|e| e.environment == params.env) {
             Some(env) => {
                 let handlebars = hogan::transform::handlebars(state.strict);
-                let mut data = String::new();
-                body.open().read_to_string(&mut data).map_err(|e| {
-                    warn!("Unable to consume transform body: {:?}", e);
-                    Status::InternalServerError
-                })?;
-                handlebars
-                    .render_template(&data, &env.config_data)
-                    .map_err(|_| Status::BadRequest)
+                match handlebars.render_template(&data, &env.config_data) {
+                    Ok(r) => HttpResponse::Ok().body(r),
+                    Err(e) => HttpResponse::BadRequest().body(format!("ERROR: {:?}", e)),
+                }
             }
-            None => Err(Status::NotFound),
+            None => HttpResponse::NotFound().finish(),
         },
-        None => Err(Status::NotFound),
+        None => HttpResponse::NotFound().finish(),
     }
 }
 
-#[post("/transform/<sha>?<filename>", data = "<body>")]
-fn transform_all_envs(
-    sha: String,
-    filename: String,
-    body: Data,
-    state: State<ServerState>,
-) -> Result<Vec<u8>, Status> {
-    let sha = format_sha(&sha);
-    let uri = format!("/transform/{}?{}", &sha, &filename);
-    match get_env(
-        &state.environments,
-        &state.config_dir,
-        None,
-        &sha,
-        &state.environments_regex,
-        &uri,
-        state.dd_metrics.as_ref(),
-    ) {
-        Some(environments) => {
-            let handlebars = hogan::transform::handlebars(state.strict);
-            let mut data = String::new();
-            body.open()
-                .read_to_string(&mut data)
-                .map_err(|e| {
-                    warn!("Unable to consume transform body: {:?}", e);
-                    Status::InternalServerError
-                })
-                .map_err(|e| {
-                    warn!("Unable to read request body {:?}", e);
-                    Status::InternalServerError
-                })?;
-            let template = Template {
-                path: PathBuf::from(filename),
-                contents: data,
-            };
-            template
-                .render_to_zip(&handlebars, &environments)
-                .map_err(|e| {
-                    warn!("Unable to make zip file: {:?}", e);
-                    Status::InternalServerError
-                })
-        }
-        None => Err(Status::NotFound),
-    }
-}
+// fn transform_all_envs(
+//     sha: String,
+//     filename: String,
+//     body: Data,
+//     state: State<ServerState>,
+// ) -> Result<Vec<u8>, Status> {
+//     let sha = format_sha(&sha);
+//     let uri = format!("/transform/{}?{}", &sha, &filename);
+//     match get_env(
+//         &state.environments,
+//         &state.config_dir,
+//         None,
+//         &sha,
+//         &state.environments_regex,
+//         &uri,
+//         state.dd_metrics.as_ref(),
+//     ) {
+//         Some(environments) => {
+//             let handlebars = hogan::transform::handlebars(state.strict);
+//             let mut data = String::new();
+//             body.open()
+//                 .read_to_string(&mut data)
+//                 .map_err(|e| {
+//                     warn!("Unable to consume transform body: {:?}", e);
+//                     Status::InternalServerError
+//                 })
+//                 .map_err(|e| {
+//                     warn!("Unable to read request body {:?}", e);
+//                     Status::InternalServerError
+//                 })?;
+//             let template = Template {
+//                 path: PathBuf::from(filename),
+//                 contents: data,
+//             };
+//             template
+//                 .render_to_zip(&handlebars, &environments)
+//                 .map_err(|e| {
+//                     warn!("Unable to make zip file: {:?}", e);
+//                     Status::InternalServerError
+//                 })
+//         }
+//         None => Err(Status::NotFound),
+//     }
+// }
 
-#[get("/envs/<sha>")]
-fn get_envs(sha: String, state: State<ServerState>) -> Result<JsonValue, Status> {
+fn get_envs(params: web::Path<ShaParams>, state: web::Data<ServerState>) -> HttpResponse {
     let mut cache = match state.environments.lock() {
         Ok(cache) => cache,
         Err(e) => {
             warn!("Unable to lock cache: {:?}", e);
-            return Err(Status::NotFound);
+            return HttpResponse::InternalServerError().finish();
         }
     };
+    let sha = format_sha(&params.sha).to_owned();
     let uri = format!("/envs/{}", &sha);
     info!("uri: {}", uri);
     if let Some(envs) = cache.get(&sha) {
@@ -489,7 +458,7 @@ fn get_envs(sha: String, state: State<ServerState>) -> Result<JsonValue, Status>
         }
         info!("Cache hit");
         let env_list = format_envs(envs);
-        Ok(json!(env_list))
+        HttpResponse::Ok().json(env_list)
     } else {
         info!("Cache miss");
         // state.dd_metrics.incr(CustomMetrics::CacheMiss.metrics_name(), &uri);
@@ -504,26 +473,24 @@ fn get_envs(sha: String, state: State<ServerState>) -> Result<JsonValue, Status>
             }
             Err(e) => {
                 warn!("Unable to lock repository {:?}", e);
-                return Err(Status::NotFound);
+                return HttpResponse::InternalServerError().finish();
             }
         }
         if let Some(envs) = cache.get(&sha) {
             let env_list = format_envs(envs);
-            Ok(json!(env_list))
+            HttpResponse::Ok().json(env_list)
         } else {
-            Err(Status::NotFound)
+            HttpResponse::NotFound().finish()
         }
     }
 }
 
-#[get("/config/<sha>/<env>")]
 fn get_config_by_env(
-    sha: String,
-    env: String,
-    state: State<ServerState>,
-) -> Result<JsonValue, Status> {
-    let sha = format_sha(&sha);
-    let uri = format!("/config/{}/{}", &sha, &env);
+    params: web::Path<ShaEnvParams>,
+    state: web::Data<ServerState>,
+) -> HttpResponse {
+    let sha = format_sha(&params.sha);
+    let uri = format!("/config/{}/{}", &sha, &params.env);
     match get_env(
         &state.environments,
         &state.config_dir,
@@ -533,13 +500,13 @@ fn get_config_by_env(
         &uri,
         state.dd_metrics.as_ref(),
     ) {
-        Some(environments) => match environments.iter().find(|e| e.environment == env) {
-            Some(env) => Ok(json!(env)),
-            None => Err(Status::NotFound),
+        Some(environments) => match environments.iter().find(|e| e.environment == params.env) {
+            Some(env) => HttpResponse::Ok().json(env),
+            None => HttpResponse::NotFound().finish(),
         },
         None => {
             warn!("Error getting environments");
-            Err(Status::InternalServerError)
+            HttpResponse::NotFound().finish()
         }
     }
 }
@@ -551,27 +518,28 @@ struct ShaResponse {
     branch_name: String,
 }
 
-#[get("/heads/<branch_name>?<remote_name>")]
-fn get_branch_sha(
-    remote_name: Option<String>,
+#[derive(Deserialize)]
+struct BranchParam {
     branch_name: String,
-    state: State<ServerState>,
-) -> Result<Json<ShaResponse>, Status> {
+}
+
+fn get_branch_sha(params: web::Path<BranchParam>, state: web::Data<ServerState>) -> HttpResponse {
+    let remote_name = Some(String::from("origin"));
     if let Ok(config_dir) = state.config_dir.lock() {
         if let Some(head_sha) = config_dir.find_branch_head(
             &remote_name.unwrap_or_else(|| String::from("origin")),
-            &branch_name,
+            &params.branch_name,
         ) {
-            Ok(Json(ShaResponse {
+            HttpResponse::Ok().json(ShaResponse {
                 head_sha,
-                branch_name,
-            }))
+                branch_name: params.branch_name.clone(),
+            })
         } else {
-            Err(Status::NotFound)
+            HttpResponse::NotFound().finish()
         }
     } else {
         warn!("Error locking git repo");
-        Err(Status::InternalServerError)
+        HttpResponse::InternalServerError().finish()
     }
 }
 
