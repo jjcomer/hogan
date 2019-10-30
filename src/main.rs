@@ -163,11 +163,6 @@ enum AppCommand {
         )]
         address: String,
 
-        /// If enabled, configures the server to handle requests as a lambda behind an API Gateway Proxy
-        /// See: https://github.com/GREsau/rocket-lamb
-        #[structopt(long = "lambda")]
-        lambda: bool,
-
         /// Set the size of the SHA LRU cache
         #[structopt(long = "cache", default_value = "100", value_name = "CACHE_SIZE")]
         cache_size: usize,
@@ -290,7 +285,6 @@ fn main() -> Result<(), Error> {
             port,
             address,
             cache_size,
-            lambda,
             environments_regex,
             datadog,
         } => {
@@ -317,7 +311,7 @@ fn main() -> Result<(), Error> {
                 strict: common.strict,
                 dd_metrics,
             };
-            start_server(address, port, lambda, state, datadog)?;
+            start_server(address, port, state, datadog)?;
         }
     }
 
@@ -335,7 +329,6 @@ struct ServerState {
 fn start_server(
     address: String,
     port: u16,
-    lambda: bool,
     state: ServerState,
     dd_enabled: bool,
 ) -> Result<(), Error> {
@@ -344,7 +337,7 @@ fn start_server(
     HttpServer::new(move || {
         actix_web::App::new()
             .register_data(server_state.clone())
-            .route("/ok", web::get().to(|| HttpResponse::Ok()))
+            .route("/ok", web::get().to(HttpResponse::Ok))
             .route("/transform/{sha}/{env}", web::post().to(transform_env))
             .route("/config/{sha}/{env}", web::get().to(get_config_by_env))
             .route("/heads/{branch_name}", web::get().to(get_branch_sha))
